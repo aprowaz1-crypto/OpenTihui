@@ -1,0 +1,126 @@
+name: Build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: iOS build
+    runs-on: macos-26
+    timeout-minutes: 240
+
+    env:
+      CONFIGURATION: Release
+      XCODE_PROJECT: openTihui.xcodeproj
+      XCODE_SCHEME: openTihui
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          echo "Xcode path: $(xcode-select -p)"
+          echo "iOS SDK: $(xcrun --sdk iphoneos --show-sdk-version)"
+          echo "Simulator SDK: $(xcrun --sdk iphonesimulator --show-sdk-version)"
+          cmake --version | head -n 1
+
+      - name: Resolve llama.cpp revision
+        id: llama
+        run: echo "sha=$(git -C llama.cpp rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      # Building llama.xcframework takes a long time, so keep it between runs.
+      # The key changes when the submodule pin, the build script, or a patch changes.
+      - name: Restore llama.cpp xcframework
+        id: framework-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: Frameworks/llama.xcframework
+          key: llama-xcframework-${{ steps.llama.outputs.sha }}-${{ hashFiles('scripts/build-llama-ios.sh', 'patches/llama.cpp/**') }}
+
+      - name: Build llama.cpp xcframework
+        if: steps.framework-cache.outputs.cache-hit != 'true'
+        run: |
+          make framework
+          du -sh Frameworks/llama.xcframework
+
+      - name: Save llama.cpp xcframework
+        if: steps.framework-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: Frameworks/llama.xcframework
+          key: ${{ steps.framework-cache.outputs.cache-primary-key }}
+
+      - name: Build app for Simulator
+        run: |
+          xcodebuild \
+            -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -configuration "$CONFIGURATION" \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Package Simulator app
+        run: |
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent \
+            "build/Build/Products/${CONFIGURATION}-iphonesimulator/openTihui.app" \
+            dist/openTihui-simulator.zip
+
+      - name: Build app for device (unsigned)
+        run: |
+          xcodebuild \
+            -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -configuration "$CONFIGURATION" \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build-device \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package unsigned IPA
+        run: |
+          mkdir -p dist/Payload
+          ditto \
+            "build-device/Build/Products/${CONFIGURATION}-iphoneos/openTihui.app" \
+            dist/Payload/openTihui.app
+          cd dist
+          zip -qry openTihui-unsigned.ipa Payload
+          rm -rf Payload
+
+      - name: Upload Simulator app
+        uses: actions/upload-artifact@v7
+        with:
+          name: openTihui-simulator
+          path: dist/openTihui-simulator.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v7
+        with:
+          name: openTihui-unsigned-ipa
+          path: dist/openTihui-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
