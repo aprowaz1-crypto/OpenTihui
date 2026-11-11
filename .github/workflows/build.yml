@@ -16,7 +16,9 @@ permissions:
 jobs:
   build:
     name: iOS build
-    runs-on: macos-26
+    # Standard Intel runner (4 vCPU / 14 GB). The arm64 macOS runners are
+    # heavily capacity-constrained and jobs often never get acquired.
+    runs-on: macos-26-intel
     timeout-minutes: 240
 
     env:
